@@ -35,7 +35,7 @@ class Stbl: Atom {
         guard children.contains(where: {$0.identifier == "stsz"}) else {
             throw StblError.StszAtomNotFound
         }
-        guard children.contains(where: {$0.identifier == "c064" || $0.identifier == "stco"}) else {
+        guard children.contains(where: {$0.identifier == "co64" || $0.identifier == "stco"}) else {
             throw StblError.ChunkOffsetAtomNotFound
         }
 
@@ -200,6 +200,14 @@ class Stbl: Atom {
                 let stringLength = chunkData.extractToInt(2)
                 let stringData = chunkData.extractFirst(stringLength)
                 let bom: Data = Data([0xfe, 0xff])
+                guard stringData.count >= 2 else {
+                    if let string = stringData.stringUtf8 {
+                        titles.append(string)
+                    } else {
+                        titles.append("Unparseable short chapter title")
+                    }
+                    continue
+                }
                 let bomRange = stringData.startIndex ..< stringData.index(stringData.startIndex, offsetBy: 2)
                 if stringData[bomRange] == bom {
                     if let string = String(data: stringData, encoding: .utf16) {
