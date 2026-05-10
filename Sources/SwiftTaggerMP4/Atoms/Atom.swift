@@ -128,23 +128,42 @@ public class Atom: CustomStringConvertible {
     /// Converts an atom to data for writing to file
     var encode: Data {
         var data = Data()
-        
-        let preliminarySize = self.contentData.count + 8        
+
+        let preliminarySize = self.contentData.count + 8
         var size = preliminarySize
         if preliminarySize > UInt32.max {
             size = 1 // use extended size UInt64 instead
         }
         data.append(size.uInt32.beData)
         data.append(self.identifier.encodedISOLatin1)
-        
+
         if preliminarySize > UInt32.max {
             let extendedSize = preliminarySize.uInt64.beData
             data.append(extendedSize)
         }
-        
+
         data.append(self.contentData)
-        
+
         return data
+    }
+
+    /// Writes atom directly to a FileHandle without building a full in-memory copy.
+    func write(to handle: FileHandle) {
+        let content = self.contentData
+        let preliminarySize = content.count + 8
+
+        var sizeValue = preliminarySize
+        if preliminarySize > UInt32.max {
+            sizeValue = 1
+        }
+        handle.write(sizeValue.uInt32.beData)
+        handle.write(self.identifier.encodedISOLatin1)
+
+        if preliminarySize > UInt32.max {
+            handle.write(preliminarySize.uInt64.beData)
+        }
+
+        handle.write(content)
     }
     
     /// Calculate the size of a parent atom from the size of the child atoms it contains.

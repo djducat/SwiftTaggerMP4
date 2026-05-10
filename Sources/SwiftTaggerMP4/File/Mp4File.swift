@@ -30,7 +30,7 @@ public class Mp4File {
             throw Mp4FileError.InvalidFileFormat
         }
         
-        self.data = try Data(contentsOf: location)
+        self.data = try Data(contentsOf: location, options: .alwaysMapped)
         var fileData = self.data
         var atoms = [Atom]()
         while !fileData.isEmpty {
@@ -56,18 +56,120 @@ public class Mp4File {
     public func write(tag: Tag, to outputLocation: URL) throws {
         try setMetadataAtoms(tag: tag)
         setLanguage(tag: tag)
-        try setChapterTrack(tag: tag)
 
-        try setMdat(tag: tag)
+        // Compute mdat layout before chapter track offset calculation
+        let titles = tag.chapterHandler.chapterTitles
+        let mediaSize = self.chunkSizes.sum()
+        let titleDataSize = titles.reduce(0) { $0 + 2 + $1.utf8.count }
+        let mdatContentSize = mediaSize + titleDataSize
+        let mdatPreliminarySize = mdatContentSize + 8
+        let mdatHeaderSize = mdatPreliminarySize > UInt32.max ? 16 : 8
 
-        var outputData = Data()
-        let size = optimizedRoot.map({$0.size}).sum()
-        outputData.reserveCapacity(size)
-        
-        for atom in self.optimizedRoot {
-            outputData.append(atom.encode)
+        try setChapterTrack(tag: tag, mdatHeaderSize: mdatHeaderSize)
+
+        // Version promotion (from setMdat — may change atom sizes)
+        for track in self.moov.tracks {
+            track.tkhd.promoteVersionIfNeeded()
         }
-        try outputData.write(to: outputLocation, options: .atomic)
+        for track in self.moov.tracks {
+            track.recalculateSize()
+        }
+        self.moov.recalculateSize()
+
+        // Save original chunk offsets for reading from source file
+        let sourceChunkOffsets = self.moov.soundTrack.mdia.minf.stbl.chunkOffsetAtom.chunkOffsetTable
+        let sourceChunkSizes = self.chunkSizes
+
+        // Remove mdat from rootAtoms — media will be streamed during write
+        self.rootAtoms = self.rootAtoms.filter { $0.identifier != "mdat" }
+
+        // Calculate new sound track chunk offsets with correct mdat header size
+        let nonMdatAtomSizes = self.rootAtoms.filter({
+            $0.identifier != "free" &&
+            $0.identifier != "skip" &&
+            $0.identifier != "wide"
+        }).map({ $0.size }).sum()
+
+        var currentOffset = mdatHeaderSize + nonMdatAtomSizes
+        var newOffsets = [currentOffset]
+        for chunkSize in sourceChunkSizes.dropLast() {
+            currentOffset += chunkSize
+            newOffsets.append(currentOffset)
+        }
+        guard newOffsets.count == self.moov.soundTrack.mdia.minf.stbl.chunkOffsetAtom.chunkOffsetTable.count else {
+            throw Mp4FileError.NewChunkOffsetArrayCountMismatch
+        }
+        self.moov.soundTrack.mdia.minf.stbl.chunkOffsetAtom.chunkOffsetTable = newOffsets
+
+        // Open source file for streaming media chunks
+        let sourceHandle = try FileHandle(forReadingFrom: self.location)
+
+        // Release mapped file data — all needed info is captured above
+        self.data = Data()
+
+        // Write to temp file then rename for atomic safety
+        let tempURL = outputLocation.deletingLastPathComponent()
+            .appendingPathComponent(UUID().uuidString + ".tmp")
+        FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+
+        do {
+            let outputHandle = try FileHandle(forWritingTo: tempURL)
+
+            // Write non-mdat atoms (ftyp, moov — small, KB-sized)
+            for atom in self.optimizedRoot {
+                atom.write(to: outputHandle)
+            }
+
+            // Write mdat header
+            if mdatPreliminarySize > UInt32.max {
+                var sizeField = UInt32(1).bigEndian
+                outputHandle.write(Data(bytes: &sizeField, count: 4))
+                outputHandle.write("mdat".data(using: .isoLatin1)!)
+                var extSize = UInt64(mdatPreliminarySize).bigEndian
+                outputHandle.write(Data(bytes: &extSize, count: 8))
+            } else {
+                var sizeField = UInt32(mdatPreliminarySize).bigEndian
+                outputHandle.write(Data(bytes: &sizeField, count: 4))
+                outputHandle.write("mdat".data(using: .isoLatin1)!)
+            }
+
+            // Stream media chunks from source file in 1MB pieces
+            let copyBufferSize = 1_048_576
+            for (index, offset) in sourceChunkOffsets.enumerated() {
+                sourceHandle.seek(toFileOffset: UInt64(offset))
+                var remaining = sourceChunkSizes[index]
+                while remaining > 0 {
+                    try autoreleasepool {
+                        let readSize = min(remaining, copyBufferSize)
+                        let piece = sourceHandle.readData(ofLength: readSize)
+                        if piece.isEmpty {
+                            throw Mp4FileError.MissingChunk
+                        }
+                        outputHandle.write(piece)
+                        remaining -= readSize
+                    }
+                }
+            }
+
+            // Write chapter title data
+            for title in titles {
+                var len = UInt16(title.count).bigEndian
+                outputHandle.write(Data(bytes: &len, count: 2))
+                outputHandle.write(Data(title.utf8))
+            }
+
+            outputHandle.closeFile()
+            sourceHandle.closeFile()
+        } catch {
+            sourceHandle.closeFile()
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
+
+        if FileManager.default.fileExists(atPath: outputLocation.path) {
+            try FileManager.default.removeItem(at: outputLocation)
+        }
+        try FileManager.default.moveItem(at: tempURL, to: outputLocation)
     }
     
     /// Sorts atoms into order to preserve media offsets

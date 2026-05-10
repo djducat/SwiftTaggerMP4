@@ -161,7 +161,7 @@ extension Mp4File {
         self.moov.soundTrack.mdia.minf.stbl.chunkOffsetAtom.chunkOffsetTable = try calculateNewMediaOffsets()
     }
     
-    func setChapterTrack(tag: Tag) throws {
+    func setChapterTrack(tag: Tag, mdatHeaderSize: Int = 8) throws {
         if tag.chapterList.isEmpty {
             self.moov.chapterTrack = nil
             self.moov.chapterTrackID = nil
@@ -198,7 +198,7 @@ extension Mp4File {
                 chapterTrackID: chapterTrackID)
             self.moov.chapterTrack = chapterTrack
             
-            var offset = mediaDataCount + 8 // +8 for mdat header data
+            var offset = mediaDataCount + mdatHeaderSize
             // increase the offset by the byte count of every atom except mdat
             // since we've already set the chapter track, except for the chunk offset atom, this count should include the chapter track atoms
             let filteredAtoms = rootAtoms.filter({

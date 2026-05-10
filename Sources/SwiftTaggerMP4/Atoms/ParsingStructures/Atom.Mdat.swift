@@ -11,11 +11,12 @@ import Foundation
 class Mdat: Atom {
     private var payload: Data
     
-    /// Initialize an `mdat` atom for parsing from the root structure
+    /// Initialize an `mdat` atom for parsing from the root structure.
+    /// Payload is discarded — write() streams media from the source file.
     override init(identifier: String, size: Int, payload: Data) throws {
-        self.payload = payload
-        
-        try super.init(identifier: identifier, size: size, payload: payload)
+        self.payload = Data()
+
+        try super.init(identifier: identifier, size: size, payload: Data())
     }
     
    /// Converts the atom's contents to Data when encoding the atom to write to file.
